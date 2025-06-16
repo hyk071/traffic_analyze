@@ -18,7 +18,16 @@ def parse_log_file(uploaded_file):
     if not date_str:
         return []
     hour = int(date_str.group(2))
-    text = uploaded_file.read().decode('utf-8')
+
+    raw_bytes = uploaded_file.read()
+    try:
+        text = raw_bytes.decode('utf-8')
+    except UnicodeDecodeError:
+        try:
+            text = raw_bytes.decode('cp949')
+        except UnicodeDecodeError:
+            text = raw_bytes.decode('euc-kr', errors='replace')
+
     for line in text.splitlines():
         m = re.search(r"\[(\d{2}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}):(\d{3})\].*Plate=([가-힣A-Za-z0-9]+)", line)
         if m:
