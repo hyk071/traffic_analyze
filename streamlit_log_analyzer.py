@@ -1,9 +1,9 @@
 import streamlit as st
-import os
 import re
 import pandas as pd
 from datetime import datetime
 import plotly.express as px
+import io
 
 # ------------------ 설정 ------------------
 LIMIT_SPEED = 50         # 제한속도
@@ -11,30 +11,29 @@ OVER_SPEED = 61          # 단속 기준
 SECTION_LENGTH = 0.8     # 구간 길이 (km)
 
 # ------------------ 로그 파싱 ------------------
-def parse_log_file(file_path):
+def parse_log_file(uploaded_file):
     vehicle_data = []
-    filename = os.path.basename(file_path)
+    filename = uploaded_file.name
     date_str = re.search(r'(\d{8})(\d{2})', filename)
     if not date_str:
         return []
-    base_date = f"20{date_str.group(1)}"
     hour = int(date_str.group(2))
-    with open(file_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            m = re.search(r"\[(\d{2}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}):(\d{3})\].*Plate=([가-힣A-Za-z0-9]+)", line)
-            if m:
-                time_str = f"20{m.group(1)}.{m.group(2)}"
-                time_obj = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S.%f")
-                plate = m.group(3).strip()
-                vehicle_data.append((plate, time_obj, hour))
+    text = uploaded_file.read().decode('utf-8')
+    for line in text.splitlines():
+        m = re.search(r"\[(\d{2}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}):(\d{3})\].*Plate=([가-힣A-Za-z0-9]+)", line)
+        if m:
+            time_str = f"20{m.group(1)}.{m.group(2)}"
+            time_obj = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S.%f")
+            plate = m.group(3).strip()
+            vehicle_data.append((plate, time_obj, hour))
     return vehicle_data
 
-# ------------------ 폴더에서 로그 수집 ------------------
-def collect_logs(folder_path, prefix):
+# ------------------ 업로드에서 로그 수집 ------------------
+def collect_logs_from_uploads(uploaded_files, prefix):
     vehicle_dict = {}
-    for fname in os.listdir(folder_path):
-        if fname.startswith(prefix) and fname.endswith(".txt"):
-            entries = parse_log_file(os.path.join(folder_path, fname))
+    for uploaded_file in uploaded_files:
+        if uploaded_file.name.startswith(prefix):
+            entries = parse_log_file(uploaded_file)
             for plate, t, hour in entries:
                 if plate not in vehicle_dict or t < vehicle_dict[plate][0]:
                     vehicle_dict[plate] = (t, hour)
@@ -56,14 +55,14 @@ st.title("🚗 구간단속 로그 분석기")
 
 col1, col2 = st.columns(2)
 with col1:
-    start_folder = st.text_input("시점 로그 폴더", value="./시점로그")
+    start_files = st.file_uploader("시점 로그 파일 업로드 (S0056...)", accept_multiple_files=True, type="txt")
 with col2:
-    end_folder = st.text_input("종점 로그 폴더", value="./종점로그")
+    end_files = st.file_uploader("종점 로그 파일 업로드 (S0052...)", accept_multiple_files=True, type="txt")
 
-if st.button("🔍 분석 시작"):
+if st.button("🔍 분석 시작") and start_files and end_files:
     with st.spinner("분석 중입니다..."):
-        start_logs = collect_logs(start_folder, "S0056")
-        end_logs = collect_logs(end_folder, "S0052")
+        start_logs = collect_logs_from_uploads(start_files, "S0056")
+        end_logs = collect_logs_from_uploads(end_files, "S0052")
         start_df, end_df, result_df = analyze_logs(start_logs, end_logs)
 
         # ------- 요약 통계 -------
@@ -109,5 +108,7 @@ if st.button("🔍 분석 시작"):
         to_download = filtered_df.copy()
         to_download["start_time"] = to_download["start_time"].astype(str)
         to_download["end_time"] = to_download["end_time"].astype(str)
-        excel = to_download.to_excel(index=False, engine="openpyxl")
-        st.download_button("엑셀 파일 다운로드", data=excel, file_name="구간단속_결과.xlsx")
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            to_download.to_excel(writer, index=False)
+        st.download_button("엑셀 파일 다운로드", data=buffer.getvalue(), file_name="구간단속_결과.xlsx")
