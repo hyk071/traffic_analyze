@@ -13,21 +13,27 @@ SECTION_LENGTH = 0.8     # 구간 길이 (km)
 
 # ------------------ 로그 파싱 ------------------
 def parse_log_file(filename, text):
-    vehicle_data = []
+    vehicle_data = {}
     date_str = re.search(r'(\d{8})(\d{2})', filename)
     if not date_str:
-        return []
-    hour = int(date_str.group(2))
-    for line in text.splitlines():
-        m = re.search(r"\[(\d{2}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}):(\d{3})\].*Plate=([가-힣A-Za-z0-9]+)", line)
-        if m:
-            time_str = f"20{m.group(1)}.{m.group(2)}"
-            try:
-                time_obj = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S.%f")
-            except ValueError:
-                continue
-            plate = m.group(3).strip()
-            vehicle_data.append((plate, time_obj, hour))
+        return {}
+
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        # 실제 통과 시각으로 "차량번호:" 로그 기준 사용
+        if "차량번호:" in line:
+            time_match = re.search(r"\[(\d{2}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}):(\d{3})\]", line)
+            plate_match = re.search(r"차량번호[:=\s]?([가-힣A-Za-z0-9]+)", line)
+            speed_match = re.search(r"속도[:=\s]?([0-9.]+)", line)
+            if time_match and plate_match:
+                time_str = f"20{time_match.group(1)}.{time_match.group(2)}"
+                try:
+                    time_obj = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S.%f")
+                except ValueError:
+                    continue
+                plate = plate_match.group(1).strip()
+                speed = float(speed_match.group(1)) if speed_match else None
+                vehicle_data[plate] = (time_obj, speed)
     return vehicle_data
 
 # ------------------ 압축에서 로그 수집 ------------------
@@ -46,19 +52,18 @@ def collect_logs_from_zip(zip_file, prefix):
                         except UnicodeDecodeError:
                             text = raw_bytes.decode('euc-kr', errors='replace')
                     entries = parse_log_file(fname, text)
-                    for plate, t, hour in entries:
-                        if plate not in vehicle_dict or t < vehicle_dict[plate][0]:
-                            vehicle_dict[plate] = (t, hour)
+                    for plate, (t, speed) in entries.items():
+                        vehicle_dict[plate] = (t, speed)  # 가장 마지막 시간으로 덮어씀
     return vehicle_dict
 
 # ------------------ 분석 함수 ------------------
 def analyze_logs(start_logs, end_logs):
-    start_df = pd.DataFrame([(k, v[0], v[1]) for k, v in start_logs.items()], columns=["plate", "start_time", "start_hour"])
-    end_df = pd.DataFrame([(k, v[0], v[1]) for k, v in end_logs.items()], columns=["plate", "end_time", "end_hour"])
-    df = pd.merge(start_df, end_df, on="plate", how="inner")
-    df["time_diff_sec"] = (df["end_time"] - df["start_time"]).dt.total_seconds()
-    df["avg_speed"] = SECTION_LENGTH / (df["time_diff_sec"] / 3600)
-    df["over_speed"] = (df["avg_speed"] >= OVER_SPEED)
+    start_df = pd.DataFrame([(k, v[0], v[1]) for k, v in start_logs.items()], columns=["번호판", "시점 통과시간", "시점 통과속도"])
+    end_df = pd.DataFrame([(k, v[0], v[1]) for k, v in end_logs.items()], columns=["번호판", "종점 통과시간", "종점 통과속도"])
+    df = pd.merge(start_df, end_df, on="번호판", how="inner")
+    df["구간 통과시간"] = (df["종점 통과시간"] - df["시점 통과시간"]).dt.total_seconds()
+    df["평균 구간속도"] = SECTION_LENGTH / (df["구간 통과시간"] / 3600)
+    df["과속 여부"] = (df["평균 구간속도"] >= OVER_SPEED)
     return start_df, end_df, df
 
 # ------------------ Streamlit UI ------------------
@@ -85,8 +90,8 @@ if st.button("🔍 분석 시작") and start_zip and end_zip:
         col3.metric("공통 차량 수", f"{len(result_df)} 대")
         col4.metric("통과율", f"{len(result_df)/len(start_df)*100:.2f} %")
 
-        st.metric("평균 통과 시간(초)", f"{result_df['time_diff_sec'].mean():.2f}")
-        st.metric("평균 구간 속도(km/h)", f"{result_df['avg_speed'].mean():.2f}")
+        st.metric("평균 통과 시간(초)", f"{result_df['구간 통과시간'].mean():.2f}")
+        st.metric("평균 구간 속도(km/h)", f"{result_df['평균 구간속도'].mean():.2f}")
 
         # ------- 필터 옵션 -------
         st.subheader("🔍 필터 옵션")
@@ -98,28 +103,26 @@ if st.button("🔍 분석 시작") and start_zip and end_zip:
 
         filtered_df = result_df.copy()
         if show_over:
-            filtered_df = filtered_df[filtered_df["over_speed"] == True]
+            filtered_df = filtered_df[filtered_df["과속 여부"] == True]
         if search_plate:
-            filtered_df = filtered_df[filtered_df["plate"].str.contains(search_plate)]
+            filtered_df = filtered_df[filtered_df["번호판"].str.contains(search_plate)]
 
         # ------- 테이블 출력 -------
         st.subheader("📋 차량별 통과 정보")
-        st.dataframe(filtered_df[["plate", "start_time", "end_time", "time_diff_sec", "avg_speed", "over_speed"]])
+        st.dataframe(filtered_df[["번호판", "시점 통과시간", "시점 통과속도", "종점 통과시간", "종점 통과속도", "구간 통과시간", "평균 구간속도", "과속 여부"]])
 
         # ------- 그래프 시각화 -------
-        st.subheader("📈 시간대별 통과량 분석")
-        hourly_stats = result_df.groupby("start_hour").size().reset_index(name="시점 통과")
-        hourly_stats["종점 통과"] = result_df.groupby("end_hour").size().values
-        hourly_stats["시간대"] = hourly_stats["start_hour"].astype(str) + "시"
-
-        fig = px.bar(hourly_stats, x="시간대", y=["시점 통과", "종점 통과"], barmode="group")
+        st.subheader("📈 통과 시간 분포 분석")
+        filtered_df["시점 시간대"] = filtered_df["시점 통과시간"].dt.hour.astype(str) + "시"
+        hourly_stats = filtered_df.groupby("시점 시간대").size().reset_index(name="통과 차량 수")
+        fig = px.bar(hourly_stats, x="시점 시간대", y="통과 차량 수")
         st.plotly_chart(fig, use_container_width=True)
 
         # ------- 엑셀 다운로드 -------
         st.subheader("⬇️ 엑셀 다운로드")
-        to_download = filtered_df.copy()
-        to_download["start_time"] = to_download["start_time"].astype(str)
-        to_download["end_time"] = to_download["end_time"].astype(str)
+        to_download = filtered_df.drop(columns=["시점 시간대"], errors='ignore').copy()
+        to_download["시점 통과시간"] = to_download["시점 통과시간"].astype(str)
+        to_download["종점 통과시간"] = to_download["종점 통과시간"].astype(str)
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             to_download.to_excel(writer, index=False)
