@@ -10,6 +10,7 @@ import zipfile
 LIMIT_SPEED = 50         # 제한속도
 OVER_SPEED = 61          # 단속 기준
 SECTION_LENGTH = 0.8     # 구간 길이 (km)
+MAX_TIME_DIFF = 3600     # 최대 허용 통과 시간차 (초) → 1시간
 
 # ------------------ 로그 파싱 ------------------
 def parse_log_file(filename, text):
@@ -20,7 +21,6 @@ def parse_log_file(filename, text):
 
     lines = text.splitlines()
     for i, line in enumerate(lines):
-        # 실제 통과 시각으로 "차량번호:" 로그 기준 사용
         if "차량번호:" in line:
             time_match = re.search(r"\[(\d{2}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}):(\d{3})\]", line)
             plate_match = re.search(r"차량번호[:=\s]?([가-힣A-Za-z0-9]+)", line)
@@ -53,7 +53,7 @@ def collect_logs_from_zip(zip_file, prefix):
                             text = raw_bytes.decode('euc-kr', errors='replace')
                     entries = parse_log_file(fname, text)
                     for plate, (t, speed) in entries.items():
-                        vehicle_dict[plate] = (t, speed)  # 가장 마지막 시간으로 덮어씀
+                        vehicle_dict[plate] = (t, speed)
     return vehicle_dict
 
 # ------------------ 분석 함수 ------------------
@@ -62,6 +62,8 @@ def analyze_logs(start_logs, end_logs):
     end_df = pd.DataFrame([(k, v[0], v[1]) for k, v in end_logs.items()], columns=["번호판", "종점 통과시간", "종점 통과속도"])
     df = pd.merge(start_df, end_df, on="번호판", how="inner")
     df["구간 통과시간"] = (df["종점 통과시간"] - df["시점 통과시간"]).dt.total_seconds()
+    df = df[df["구간 통과시간"] >= 0]  # 시점보다 종점이 빠른 경우 제거
+    df = df[df["구간 통과시간"] <= MAX_TIME_DIFF]  # 1시간 이상 소요된 차량 제거
     df["평균 구간속도"] = SECTION_LENGTH / (df["구간 통과시간"] / 3600)
     df["과속 여부"] = (df["평균 구간속도"] >= OVER_SPEED)
     return start_df, end_df, df
@@ -76,11 +78,18 @@ with col1:
 with col2:
     end_zip = st.file_uploader("종점 로그 Zip 파일 (S0052...)", type="zip")
 
+sort_option = st.selectbox("정렬 기준을 선택하세요", ["시점 통과시간", "평균 구간속도"])
+
 if st.button("🔍 분석 시작") and start_zip and end_zip:
     with st.spinner("Zip 압축 해제 및 로그 분석 중..."):
         start_logs = collect_logs_from_zip(start_zip, "S0056")
         end_logs = collect_logs_from_zip(end_zip, "S0052")
         start_df, end_df, result_df = analyze_logs(start_logs, end_logs)
+
+        if sort_option == "평균 구간속도":
+            result_df = result_df.sort_values(by="평균 구간속도", ascending=False)
+        else:
+            result_df = result_df.sort_values(by="시점 통과시간")
 
         # ------- 요약 통계 -------
         st.subheader("📊 요약 통계")
@@ -112,7 +121,7 @@ if st.button("🔍 분석 시작") and start_zip and end_zip:
         st.dataframe(filtered_df[["번호판", "시점 통과시간", "시점 통과속도", "종점 통과시간", "종점 통과속도", "구간 통과시간", "평균 구간속도", "과속 여부"]])
 
         # ------- 그래프 시각화 -------
-        st.subheader("📈 통과 시간 분포 분석")
+        st.subheader("📈 시점 시간대별 통과량")
         filtered_df["시점 시간대"] = filtered_df["시점 통과시간"].dt.hour.astype(str) + "시"
         hourly_stats = filtered_df.groupby("시점 시간대").size().reset_index(name="통과 차량 수")
         fig = px.bar(hourly_stats, x="시점 시간대", y="통과 차량 수")
@@ -123,6 +132,7 @@ if st.button("🔍 분석 시작") and start_zip and end_zip:
         to_download = filtered_df.drop(columns=["시점 시간대"], errors='ignore').copy()
         to_download["시점 통과시간"] = to_download["시점 통과시간"].astype(str)
         to_download["종점 통과시간"] = to_download["종점 통과시간"].astype(str)
+        to_download = to_download.sort_values(by="시점 통과시간")
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             to_download.to_excel(writer, index=False)
