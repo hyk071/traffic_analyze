@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime
 import plotly.express as px
 import io
+import zipfile
 
 # ------------------ 설정 ------------------
 LIMIT_SPEED = 50         # 제한속도
@@ -11,41 +12,43 @@ OVER_SPEED = 61          # 단속 기준
 SECTION_LENGTH = 0.8     # 구간 길이 (km)
 
 # ------------------ 로그 파싱 ------------------
-def parse_log_file(uploaded_file):
+def parse_log_file(filename, text):
     vehicle_data = []
-    filename = uploaded_file.name
     date_str = re.search(r'(\d{8})(\d{2})', filename)
     if not date_str:
         return []
     hour = int(date_str.group(2))
-
-    raw_bytes = uploaded_file.read()
-    try:
-        text = raw_bytes.decode('utf-8')
-    except UnicodeDecodeError:
-        try:
-            text = raw_bytes.decode('cp949')
-        except UnicodeDecodeError:
-            text = raw_bytes.decode('euc-kr', errors='replace')
-
     for line in text.splitlines():
         m = re.search(r"\[(\d{2}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}):(\d{3})\].*Plate=([가-힣A-Za-z0-9]+)", line)
         if m:
             time_str = f"20{m.group(1)}.{m.group(2)}"
-            time_obj = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S.%f")
+            try:
+                time_obj = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S.%f")
+            except ValueError:
+                continue
             plate = m.group(3).strip()
             vehicle_data.append((plate, time_obj, hour))
     return vehicle_data
 
-# ------------------ 업로드에서 로그 수집 ------------------
-def collect_logs_from_uploads(uploaded_files, prefix):
+# ------------------ 압축에서 로그 수집 ------------------
+def collect_logs_from_zip(zip_file, prefix):
     vehicle_dict = {}
-    for uploaded_file in uploaded_files:
-        if uploaded_file.name.startswith(prefix):
-            entries = parse_log_file(uploaded_file)
-            for plate, t, hour in entries:
-                if plate not in vehicle_dict or t < vehicle_dict[plate][0]:
-                    vehicle_dict[plate] = (t, hour)
+    with zipfile.ZipFile(zip_file) as zf:
+        for fname in zf.namelist():
+            if fname.startswith(prefix) and fname.endswith(".txt"):
+                with zf.open(fname) as file:
+                    raw_bytes = file.read()
+                    try:
+                        text = raw_bytes.decode('utf-8')
+                    except UnicodeDecodeError:
+                        try:
+                            text = raw_bytes.decode('cp949')
+                        except UnicodeDecodeError:
+                            text = raw_bytes.decode('euc-kr', errors='replace')
+                    entries = parse_log_file(fname, text)
+                    for plate, t, hour in entries:
+                        if plate not in vehicle_dict or t < vehicle_dict[plate][0]:
+                            vehicle_dict[plate] = (t, hour)
     return vehicle_dict
 
 # ------------------ 분석 함수 ------------------
@@ -60,18 +63,18 @@ def analyze_logs(start_logs, end_logs):
 
 # ------------------ Streamlit UI ------------------
 st.set_page_config(layout="wide")
-st.title("🚗 구간단속 로그 분석기")
+st.title("🚗 구간단속 로그 분석기 (Zip 업로드)")
 
 col1, col2 = st.columns(2)
 with col1:
-    start_files = st.file_uploader("시점 로그 파일 업로드 (S0056...)", accept_multiple_files=True, type="txt")
+    start_zip = st.file_uploader("시점 로그 Zip 파일 (S0056...)", type="zip")
 with col2:
-    end_files = st.file_uploader("종점 로그 파일 업로드 (S0052...)", accept_multiple_files=True, type="txt")
+    end_zip = st.file_uploader("종점 로그 Zip 파일 (S0052...)", type="zip")
 
-if st.button("🔍 분석 시작") and start_files and end_files:
-    with st.spinner("분석 중입니다..."):
-        start_logs = collect_logs_from_uploads(start_files, "S0056")
-        end_logs = collect_logs_from_uploads(end_files, "S0052")
+if st.button("🔍 분석 시작") and start_zip and end_zip:
+    with st.spinner("Zip 압축 해제 및 로그 분석 중..."):
+        start_logs = collect_logs_from_zip(start_zip, "S0056")
+        end_logs = collect_logs_from_zip(end_zip, "S0052")
         start_df, end_df, result_df = analyze_logs(start_logs, end_logs)
 
         # ------- 요약 통계 -------
